@@ -2,7 +2,14 @@
 
 ## 目录导航
 
+- [1.0.1 - 2026-06-03](#101---2026-06-03)
 - [1.0.0 - 2026-06-02](#100---2026-06-02)
+
+## 1.0.1 - 2026-06-03
+
+- Remove source map files from npm package output.
+- Add a package boundary check that fails when `npm pack` includes `.map` files.
+- Run the package boundary check in CI, publish workflow, and `prepublishOnly`.
 
 ## 1.0.0 - 2026-06-02
 

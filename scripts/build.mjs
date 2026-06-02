@@ -9,7 +9,7 @@ const shared = {
   platform: "node",
   target: "node18",
   packages: "external",
-  sourcemap: true,
+  sourcemap: false,
   minify: false,
   logLevel: "info",
 };

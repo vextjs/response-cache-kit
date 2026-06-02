@@ -54,5 +54,5 @@ jobs:
       - name: Security audit
         run: npm audit --omit=dev
 
-      - name: Package dry run
-        run: npm pack --dry-run
+      - name: Package boundary check
+        run: npm run pack:check

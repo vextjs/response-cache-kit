@@ -457,6 +457,7 @@ npm run build
 npm run benchmark
 npm run benchmark:http
 npm run benchmark:compare
+npm run pack:check
 npm audit
 npm pack --dry-run
 ```
