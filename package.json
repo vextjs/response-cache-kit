@@ -1,0 +1,69 @@
+{
+  "name": "response-cache-kit",
+  "version": "1.0.0",
+  "description": "Framework-agnostic response caching toolkit for Node.js services.",
+  "type": "module",
+  "main": "./dist/cjs/index.cjs",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs && tsc -p tsconfig.types.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "benchmark": "npm run build && node scripts/benchmark.mjs",
+    "benchmark:http": "npm run build && node benchmarks/http.mjs",
+    "benchmark:compare": "npm run build && node benchmarks/compare.mjs",
+    "prepublishOnly": "npm run typecheck && npm run test:coverage && npm run build && npm audit --omit=dev && npm pack --dry-run"
+  },
+  "keywords": [
+    "response-cache",
+    "http-cache",
+    "cache",
+    "nodejs",
+    "typescript",
+    "single-flight",
+    "cache-hub",
+    "vext"
+  ],
+  "homepage": "https://github.com/vextjs/response-cache-kit#readme",
+  "bugs": {
+    "url": "https://github.com/vextjs/response-cache-kit/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vextjs/response-cache-kit.git"
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "cache-hub": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.8"
+  }
+}
