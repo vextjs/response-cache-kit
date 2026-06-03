@@ -6,12 +6,21 @@ import {
   evaluateResponsePolicy,
 } from "../../src/index.js";
 import { normalizeMethod } from "../../src/policy.js";
-import { createMemoryResponseCacheStore } from "../../src/store.js";
+import {
+  createMemoryResponseCacheStore,
+  createResponseCacheNamespaceTag,
+} from "../../src/store.js";
 
+const baseCache = createMemoryResponseCacheStore();
 const baseOptions = {
-  cache: createMemoryResponseCacheStore(),
+  runtime: {
+    cache: baseCache,
+    async close() {},
+  },
+  cache: baseCache,
   ttl: 1_000,
   namespace: "test",
+  namespaceTag: createResponseCacheNamespaceTag("test"),
   vary: [],
   tags: [],
   cacheableMethods: new Set(DEFAULT_CACHEABLE_METHODS),

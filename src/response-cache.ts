@@ -1,5 +1,8 @@
 import {
-  createMemoryResponseCacheStore,
+  clearResponseCacheRuntime,
+  createResponseCacheNamespaceTag,
+  createResponseCacheRuntime,
+  invalidateResponseCacheTag,
   setResponseSnapshot,
 } from "./store.js";
 import { createResponseCacheKey } from "./key.js";
@@ -23,7 +26,6 @@ import type {
   ResponseCacheMetadata,
   ResponseCacheOptions,
   ResponseCacheOrigin,
-  ResponseCacheOriginResponse,
   ResponseCacheRequest,
   ResponseCacheResult,
   ResponseCacheStats,
@@ -31,11 +33,11 @@ import type {
 } from "./types.js";
 
 interface FetchAndStoreResult {
-  response: ResponseCacheOriginResponse;
   snapshot: ResponseSnapshot;
   stored: boolean;
   notStoredReason?: string;
   cacheWriteError?: boolean;
+  leaseWaitHit?: boolean;
 }
 
 export function createResponseCache(
@@ -79,12 +81,12 @@ class DefaultResponseCache implements ResponseCache {
     }
 
     const flight = await this.singleFlight.do(key, () =>
-      this.fetchAndStore(key, origin, resolved)
+      this.fetchAndStoreWithLease(key, origin, resolved)
     );
 
     const metadata = createMissMetadata(
       key,
-      flight.shared,
+      flight.shared || flight.value.leaseWaitHit === true,
       flight.value.stored,
       flight.value.notStoredReason,
       flight.value.cacheWriteError
@@ -102,7 +104,10 @@ class DefaultResponseCache implements ResponseCache {
   }
 
   async clear(): Promise<void> {
-    await this.options.cache.clear();
+    await clearResponseCacheRuntime(
+      this.options.runtime,
+      this.options.namespaceTag
+    );
   }
 
   async delete(key: string): Promise<void> {
@@ -110,7 +115,7 @@ class DefaultResponseCache implements ResponseCache {
   }
 
   async invalidateTag(tag: string): Promise<void> {
-    await this.options.cache.invalidateByTag?.(tag);
+    await invalidateResponseCacheTag(this.options.runtime, tag);
   }
 
   stats(): ResponseCacheStats {
@@ -135,6 +140,10 @@ class DefaultResponseCache implements ResponseCache {
 
   getStore() {
     return this.options.cache;
+  }
+
+  async close(): Promise<void> {
+    await this.options.runtime.close();
   }
 
   private async getCachedSnapshot(
@@ -163,7 +172,6 @@ class DefaultResponseCache implements ResponseCache {
 
     if (!responseDecision.cacheable) {
       return {
-        response,
         snapshot,
         stored: false,
         notStoredReason: responseDecision.reason as string,
@@ -176,12 +184,12 @@ class DefaultResponseCache implements ResponseCache {
         key,
         snapshot,
         options.ttl,
-        options.tags
+        options.tags,
+        options.namespaceTag
       );
-      return { response, snapshot, stored: true };
+      return { snapshot, stored: true };
     } catch {
       return {
-        response,
         snapshot,
         stored: false,
         cacheWriteError: true,
@@ -189,19 +197,89 @@ class DefaultResponseCache implements ResponseCache {
       };
     }
   }
+
+  private async fetchAndStoreWithLease(
+    key: string,
+    origin: ResponseCacheOrigin,
+    options: ResolvedResponseCacheOptions
+  ): Promise<FetchAndStoreResult> {
+    const leaseStore = options.runtime.leaseStore;
+    const leaseOptions = options.runtime.lease;
+    if (!leaseStore || !leaseOptions) {
+      return this.fetchAndStore(key, origin, options);
+    }
+
+    const leaseTtl = resolveLeaseTtl(options.ttl, leaseOptions.ttl);
+    const lease = await leaseStore.acquireLease(key, leaseTtl);
+    if (lease) {
+      try {
+        return await this.fetchAndStore(key, origin, options);
+      } finally {
+        await lease.release().catch(() => false);
+      }
+    }
+
+    const waitedSnapshot = await this.waitForLeaseFill(
+      key,
+      options,
+      leaseOptions.waitForOwner ?? leaseTtl + 25,
+      leaseOptions.pollInterval ?? 10
+    );
+    if (waitedSnapshot) {
+      return {
+        snapshot: waitedSnapshot,
+        stored: true,
+        leaseWaitHit: true,
+      };
+    }
+
+    const retryLease = await leaseStore.acquireLease(key, leaseTtl);
+    if (retryLease) {
+      try {
+        return await this.fetchAndStore(key, origin, options);
+      } finally {
+        await retryLease.release().catch(() => false);
+      }
+    }
+
+    if (leaseOptions.onTimeout === "throw") {
+      throw new Error(`[response-cache-kit] lease wait timed out for key: ${key}`);
+    }
+
+    return this.fetchAndStore(key, origin, options);
+  }
+
+  private async waitForLeaseFill(
+    key: string,
+    options: ResolvedResponseCacheOptions,
+    waitMs: number,
+    pollIntervalMs: number
+  ): Promise<ResponseSnapshot | undefined> {
+    const deadline = Date.now() + Math.max(0, Math.floor(waitMs));
+    const pollMs = Math.max(1, Math.floor(pollIntervalMs));
+
+    while (Date.now() <= deadline) {
+      const cached = await this.getCachedSnapshot(key, options);
+      if (cached) {
+        return cached;
+      }
+      await sleep(pollMs);
+    }
+
+    return undefined;
+  }
 }
 
 function resolveOptions(options: ResponseCacheOptions): ResolvedResponseCacheOptions {
   const ttl = options.ttl ?? 60_000;
   const namespace = options.namespace ?? "response-cache";
-  const cache = createMemoryResponseCacheStore({
-    defaultTtl: ttl,
-    ...(options.cacheHub ?? {}),
-  });
+  const runtime = createResponseCacheRuntime(options.cacheHub, ttl);
   const resolved: ResolvedResponseCacheOptions = {
-    cache,
+    runtime,
+    cache: runtime.cache,
     ttl,
     namespace,
+    namespaceTag: createResponseCacheNamespaceTag(namespace),
     vary: options.vary ?? [],
     tags: options.tags ?? [],
     cacheableMethods: new Set(
@@ -228,9 +306,13 @@ function mergeHandleOptions(
   overrides: ResponseCacheHandleOptions
 ): ResolvedResponseCacheOptions {
   const merged: ResolvedResponseCacheOptions = {
+    runtime: base.runtime,
     cache: base.cache,
     ttl: overrides.ttl ?? base.ttl,
     namespace: overrides.namespace ?? base.namespace,
+    namespaceTag: overrides.namespace
+      ? createResponseCacheNamespaceTag(overrides.namespace)
+      : base.namespaceTag,
     vary: overrides.vary ?? base.vary,
     tags: mergeTags(base.tags, overrides.tags),
     cacheableMethods: overrides.cacheableMethods
@@ -284,4 +366,17 @@ function createMissMetadata(
   }
 
   return metadata;
+}
+
+function resolveLeaseTtl(ttl: number, override?: number): number {
+  if (override !== undefined) {
+    return Math.max(1, Math.floor(override));
+  }
+  return Math.max(50, Math.min(Math.max(1, ttl), 5_000));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

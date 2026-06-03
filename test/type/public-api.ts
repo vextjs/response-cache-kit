@@ -19,6 +19,45 @@ createResponseCache({
 createResponseCache({
   ttl: 1_000,
   cacheHub: {
+    mode: "redis",
+    client: {},
+    metaKeyPrefix: "app:response-cache",
+    scanCount: 100,
+    deleteCommand: "unlink",
+    lease: {
+      ttl: 500,
+      waitForOwner: 600,
+      pollInterval: 10,
+      onTimeout: "fetch",
+      keyPrefix: "app:lease",
+      ownerId: "worker-a",
+    },
+    distributed: {
+      redisUrl: "redis://localhost:6379",
+      channel: "app:response-cache:invalidate",
+      instanceId: "worker-a",
+    },
+  },
+});
+
+createResponseCache({
+  ttl: 1_000,
+  cacheHub: {
+    mode: "multi-level",
+    memory: { maxEntries: 100 },
+    redis: { client: {} },
+    writePolicy: "both",
+    backfillOnRemoteHit: true,
+    remoteTimeout: 50,
+    remoteInvalidationErrors: "ignore",
+    lease: true,
+    distributed: false,
+  },
+});
+
+createResponseCache({
+  ttl: 1_000,
+  cacheHub: {
     // @ts-expect-error response TTL is controlled by response-cache-kit.
     defaultTtl: 1_000,
   },
@@ -34,6 +73,7 @@ const cache = createResponseCache();
 await cache.delete("key");
 await cache.invalidateTag("tag");
 await cache.getRemainingTtl("key");
+await cache.close?.();
 cache.stats();
 
 const request = normalizeResponseCacheRequest({

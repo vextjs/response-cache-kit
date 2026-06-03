@@ -136,7 +136,7 @@ organization, or session IDs.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `cacheHub` | `ResponseCacheHubOptions` | `{}` | Options passed to the internal `cache-hub` `MemoryCache`. `defaultTtl` is not exposed because response TTL is controlled by `ttl`. |
+| `cacheHub` | `ResponseCacheHubOptions` | `{}` | Options for the internal `cache-hub` store. Omit `mode` for Memory, or set `mode: "redis"` / `"multi-level"` explicitly. `defaultTtl` is not exposed because response TTL is controlled by `ttl`. |
 | `ttl` | `number` | `60000` | Cache TTL in milliseconds. `ttl <= 0` bypasses caching. |
 | `namespace` | `string` | `"response-cache"` | Prefix used when building cache keys. Useful when sharing one store across modules. |
 | `vary` | `readonly string[] \| "*"` | `[]` | Header names that separate cache entries when those headers change the response. Use `"*"` only when every request header intentionally participates in the key. |
@@ -167,7 +167,7 @@ const cache = createResponseCache({
 });
 ```
 
-`cacheHub` fields:
+Memory `cacheHub` fields:
 
 | Field | Type | Default from `cache-hub` | Description |
 |-------|------|--------------------------|-------------|
@@ -180,6 +180,100 @@ const cache = createResponseCache({
 `defaultTtl` and `enableTags` are not exposed in `cacheHub`. Response TTL belongs
 to `response-cache-kit`; tag indexes are enabled internally so response tags and
 `invalidateTag()` work without user store wiring.
+
+Redis and multi-level modes are opt-in. They still use `cache-hub`; there is no
+custom external store injection.
+
+```typescript
+const redisCache = createResponseCache({
+  ttl: 10_000,
+  namespace: "api",
+  cacheHub: {
+    mode: "redis",
+    url: "redis://localhost:6379",
+    metaKeyPrefix: "api:response-cache",
+    scanCount: 200,
+    deleteCommand: "unlink",
+    lease: {
+      ttl: 1_000,
+      waitForOwner: 1_200,
+      pollInterval: 10,
+      onTimeout: "fetch",
+    },
+  },
+});
+
+const multiLevelCache = createResponseCache({
+  ttl: 10_000,
+  namespace: "api",
+  cacheHub: {
+    mode: "multi-level",
+    memory: { maxEntries: 5000 },
+    redis: {
+      url: "redis://localhost:6379",
+      metaKeyPrefix: "api:response-cache",
+    },
+    writePolicy: "both",
+    backfillOnRemoteHit: true,
+    remoteTimeout: 50,
+    lease: true,
+  },
+});
+```
+
+Redis mode fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | `"redis"` | required | Enables the `cache-hub` Redis adapter. |
+| `url` | `string` | `"redis://localhost:6379"` | Redis URL used when no `client` is provided. URL mode uses cache-hub's optional `ioredis` peer. |
+| `client` | `object` | none | Existing Redis-like client. Lifecycle remains owned by the caller. |
+| `metaKeyPrefix` | `string` | cache-hub default | Prefix for tag metadata keys. |
+| `scanCount` | `number` | cache-hub default | SCAN batch size for pattern/tag operations. |
+| `deleteCommand` | `"del" \| "unlink"` | `"del"` | Redis delete command used by cache-hub. |
+| `lease` | `boolean \| ResponseCacheHubLeaseOptions` | `false` | Enables Redis-backed cross-process refresh coordination. |
+| `distributed` | `boolean \| ResponseCacheHubDistributedOptions` | `false` | Enables cache-hub distributed tag invalidation. |
+
+Multi-level mode fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | `"multi-level"` | required | Uses local Memory as L1 and Redis as L2. |
+| `memory` | `ResponseCacheHubMemoryOptions` | `{}` | L1 Memory options. |
+| `redis` | `ResponseCacheHubRedisTargetOptions` | `{}` | L2 Redis target and metadata options. |
+| `writePolicy` | `"both" \| "local-first-async-remote"` | cache-hub default | Write-through behavior. |
+| `backfillOnRemoteHit` | `boolean` | cache-hub default | Whether L2 hits should refill L1. |
+| `remoteTimeout` | `number` | cache-hub default | L2 read timeout in milliseconds. |
+| `remoteInvalidationErrors` | `"ignore" \| "throw"` | cache-hub default | Whether L2 tag invalidation failures throw. |
+| `lease` | `boolean \| ResponseCacheHubLeaseOptions` | `false` | Uses the Redis layer for cross-process lease coordination. |
+| `distributed` | `boolean \| ResponseCacheHubDistributedOptions` | `false` | Broadcasts tag invalidation across instances. |
+
+Lease fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | `true` when object/`true` is provided | Set `false` to disable a prepared lease config. |
+| `ttl` | `number` | derived from response TTL, capped for refresh windows | Lease TTL in milliseconds. |
+| `waitForOwner` | `number` | `leaseTtl + 25` | How long a non-owner waits for the owner to fill cache. |
+| `pollInterval` | `number` | `10` | Cache polling interval while waiting. |
+| `onTimeout` | `"fetch" \| "throw"` | `"fetch"` | Whether to run origin or throw when no owner fills cache in time. |
+| `keyPrefix` | `string` | cache-hub default | Redis lease key prefix. |
+| `ownerId` | `string` | generated by cache-hub | Stable owner prefix for lease tokens. |
+
+Distributed fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | `true` when object/`true` is provided | Set `false` to disable a prepared distributed config. |
+| `redisUrl` | `string` | cache-hub default | Redis URL for pub/sub when no `redis` object is provided. |
+| `redis` | `object` | none | Existing Redis-like pub connection. |
+| `channel` | `string` | cache-hub default | Pub/sub invalidation channel. |
+| `instanceId` | `string` | generated by cache-hub | Instance identifier used to ignore self messages. |
+
+When Redis URL mode or distributed invalidation is enabled, the consuming
+application must satisfy cache-hub's optional Redis peer. Default Memory mode
+does not load or require Redis. Call `await cache.close?.()` during application
+shutdown when using Redis, MultiLevel, or distributed invalidation.
 
 ### Cache Lifetime: `ttl`
 
@@ -279,8 +373,8 @@ designed.
 
 ### Internal cache-hub Store: `cacheHub`
 
-`cacheHub` configures the internal `cache-hub` memory store. It does not accept
-an external store instance.
+`cacheHub` configures the internal `cache-hub` store. It does not accept an
+external store instance.
 
 - `maxEntries`: cap the number of cached responses.
 - `maxMemory`: approximate memory limit in bytes; `0` means no explicit limit.
@@ -290,6 +384,12 @@ an external store instance.
   underlying store is disabled, so requests still run through `cache.handle()`
   but cannot build useful hits. Use it for local debugging or temporary cache
   shutdowns, not as a long-term production setting.
+- `mode: "redis"`: stores response snapshots in cache-hub's Redis adapter.
+- `mode: "multi-level"`: uses cache-hub's L1 Memory + L2 Redis cache.
+- `lease`: optional Redis-backed cross-process refresh coordination. Same-process
+  single-flight remains enabled in every mode.
+- `distributed`: optional cache-hub Pub/Sub invalidation for tags across
+  instances.
 
 ### Advanced Key Builder: `keyBuilder`
 
@@ -398,7 +498,10 @@ Builds the cache key without reading or writing the store.
 
 ### `cache.clear()`
 
-Clears the underlying `cache-hub` store.
+Clears entries written by the current response cache namespace. Stored snapshots
+always include an internal namespace tag, so Redis and MultiLevel modes use tag
+invalidation instead of `flushdb`. If a future store has no tag invalidation
+helper, `clear()` falls back to the store's own `clear()`.
 
 ### `cache.delete(key)`
 
@@ -420,11 +523,21 @@ Returns `cache-hub` statistics such as `entries`, `hits`, `misses`, `hitRate`,
 Returns the remaining TTL in milliseconds, `null` for a non-expiring key, or
 `undefined` when the key is missing or TTL lookup is unavailable.
 
+### `cache.close?()`
+
+Optional lifecycle hook. Use it during application shutdown when Redis,
+MultiLevel, or distributed invalidation is enabled. Memory mode also exposes it,
+but existing mocks do not need to implement it because the public contract keeps
+`close` optional.
+
 ### `createResponseCacheHeaders(result, options?)`
 
 Creates response cache headers from metadata. By default it emits `X-Cache:
 HIT` for hits and `X-Cache: MISS` for miss-like states. Set
-`cacheControl: true` to also emit `Cache-Control: public,max-age=N`.
+`cacheControl: true` to also emit `Cache-Control: public,max-age=N` only when
+the result was actually stored in response cache. Responses skipped because of
+`Set-Cookie`, `private`, `no-store`, TTL bypass, or cache write failure do not
+receive a new public `Cache-Control` header from this helper.
 
 ### Adapter helpers
 
@@ -649,6 +762,8 @@ async function runVextRoute(req, res, route) {
 - Skips `Authorization` requests unless a `partitionKey` is provided.
 - Filters hop-by-hop headers from cached snapshots.
 - Uses same-key single-flight protection for concurrent refreshes.
+- Can use Redis lease coordination for cross-process same-key refreshes when
+  `cacheHub.mode` is `"redis"` or `"multi-level"`.
 - Enables cache-hub tag indexes internally.
 
 ## Concurrent Expiry Protection
@@ -656,6 +771,20 @@ async function runVextRoute(req, res, route) {
 If a cached response has `ttl: 2_000` and 10000 identical requests arrive after
 it expires, only one request refreshes the origin. The other requests wait for
 the same in-flight refresh and return the same updated response snapshot.
+
+That default protection is per cache instance. In multi-process deployments,
+enable Redis lease coordination to reduce cross-process refresh storms:
+
+```typescript
+createResponseCache({
+  ttl: 2_000,
+  cacheHub: {
+    mode: "redis",
+    url: "redis://localhost:6379",
+    lease: { waitForOwner: 1_000, onTimeout: "fetch" },
+  },
+});
+```
 
 Different keys are independent. Failed origin refreshes are not cached, and a
 later request can retry.
@@ -750,9 +879,18 @@ temporary cache shutdowns, not as a long-term production setting.
 
 ### Can I use Redis or multi-level cache?
 
-`cache-hub` is the only runtime caching dependency. Redis and multi-level cache
-support should be designed as a separate cache-hub integration batch, not as an
-external store option in `response-cache-kit`.
+Yes. Use `cacheHub.mode: "redis"` or `cacheHub.mode: "multi-level"`. The
+underlying implementation is still cache-hub; `response-cache-kit` does not
+accept a custom external store. Redis URL mode and distributed invalidation rely
+on cache-hub's optional Redis peer, while default Memory mode does not require
+Redis.
+
+### Why did Redis mode say ioredis is missing?
+
+`response-cache-kit` only has `cache-hub` as a runtime dependency. Redis support
+is provided by cache-hub's Redis adapter, whose Redis client is optional. Install
+the Redis peer in the consuming application when you use URL mode or distributed
+invalidation, or pass an existing Redis-like `client`.
 
 ### Why is `npm run benchmark` heavier than unit tests?
 

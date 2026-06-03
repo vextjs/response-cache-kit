@@ -41,6 +41,10 @@ export function toCacheHeaderValue(state: ResponseCacheState): "HIT" | "MISS" {
 export function getMaxAgeSeconds(
   result: ResponseCacheResult
 ): number | undefined {
+  if (result.metadata.stored !== true) {
+    return undefined;
+  }
+
   const ttl = result.metadata.ttl;
   if (ttl === undefined) {
     return undefined;

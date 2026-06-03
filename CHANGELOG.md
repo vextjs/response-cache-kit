@@ -3,6 +3,7 @@
 ## 目录导航
 
 - [Unreleased](#unreleased)
+- [1.2.0 - 2026-06-03](#120---2026-06-03)
 - [1.1.0 - 2026-06-03](#110---2026-06-03)
 - [1.0.1 - 2026-06-03](#101---2026-06-03)
 - [1.0.0 - 2026-06-02](#100---2026-06-02)
@@ -10,6 +11,15 @@
 ## Unreleased
 
 - No unreleased changes.
+
+## 1.2.0 - 2026-06-03
+
+- Add `cacheHub.mode: "redis"` and `"multi-level"` runtime options backed by `cache-hub@^2.2.0`.
+- Add Redis lease coordination for cross-process same-key refresh protection.
+- Add optional distributed tag invalidation and optional `cache.close?.()` lifecycle support.
+- Make `cache.clear()` invalidate the current response cache namespace by internal tag, avoiding Redis `flushdb`.
+- Fix `Cache-Control` helpers so unstored responses never receive a new public `max-age`.
+- Expand English and Chinese docs with full Memory/Redis/MultiLevel/lease/distributed configuration, lifecycle notes, and Redis troubleshooting.
 
 ## 1.1.0 - 2026-06-03
 

@@ -1,4 +1,9 @@
-import type { CacheLike, CacheStats, MemoryCacheOptions } from "cache-hub";
+import type {
+  CacheLeaseStore,
+  CacheLike,
+  CacheStats,
+  MemoryCacheOptions,
+} from "cache-hub";
 
 export type HeaderValue =
   | string
@@ -78,13 +83,72 @@ export type ResponseCacheKeyBuilder = (
 
 export type ResponseCacheVary = readonly string[] | "*";
 
-export interface ResponseCacheHubOptions {
+export interface ResponseCacheHubMemoryOptions {
+  mode?: "memory";
   maxEntries?: NonNullable<MemoryCacheOptions["maxEntries"]>;
   maxMemory?: NonNullable<MemoryCacheOptions["maxMemory"]>;
   enableStats?: NonNullable<MemoryCacheOptions["enableStats"]>;
   cleanupInterval?: NonNullable<MemoryCacheOptions["cleanupInterval"]>;
   enabled?: NonNullable<MemoryCacheOptions["enabled"]>;
 }
+
+export interface ResponseCacheHubRedisTargetOptions {
+  url?: string;
+  client?: object;
+  metaKeyPrefix?: string;
+  scanCount?: number;
+  deleteCommand?: "del" | "unlink";
+}
+
+export interface ResponseCacheHubLeaseOptions {
+  enabled?: boolean;
+  ttl?: number;
+  waitForOwner?: number;
+  pollInterval?: number;
+  onTimeout?: "fetch" | "throw";
+  keyPrefix?: string;
+  ownerId?: string;
+}
+
+export type ResponseCacheHubLeaseConfig =
+  | boolean
+  | ResponseCacheHubLeaseOptions;
+
+export interface ResponseCacheHubDistributedOptions {
+  enabled?: boolean;
+  redisUrl?: string;
+  redis?: object;
+  channel?: string;
+  instanceId?: string;
+}
+
+export type ResponseCacheHubDistributedConfig =
+  | boolean
+  | ResponseCacheHubDistributedOptions;
+
+export interface ResponseCacheHubRedisOptions
+  extends ResponseCacheHubRedisTargetOptions {
+  mode: "redis";
+  lease?: ResponseCacheHubLeaseConfig;
+  distributed?: ResponseCacheHubDistributedConfig;
+}
+
+export interface ResponseCacheHubMultiLevelOptions {
+  mode: "multi-level";
+  memory?: ResponseCacheHubMemoryOptions;
+  redis?: ResponseCacheHubRedisTargetOptions;
+  writePolicy?: "both" | "local-first-async-remote";
+  backfillOnRemoteHit?: boolean;
+  remoteTimeout?: number;
+  remoteInvalidationErrors?: "ignore" | "throw";
+  lease?: ResponseCacheHubLeaseConfig;
+  distributed?: ResponseCacheHubDistributedConfig;
+}
+
+export type ResponseCacheHubOptions =
+  | ResponseCacheHubMemoryOptions
+  | ResponseCacheHubRedisOptions
+  | ResponseCacheHubMultiLevelOptions;
 
 export interface ResponseCacheOptions {
   cacheHub?: ResponseCacheHubOptions;
@@ -120,14 +184,37 @@ export interface ResponseCache {
   getRemainingTtl(key: string): Promise<number | null | undefined>;
   clear(): Promise<void>;
   getStore(): CacheLike;
+  close?(): Promise<void>;
 }
 
 export interface ResponseCacheStats extends CacheStats {}
 
+export interface ResolvedResponseCacheLeaseOptions {
+  ttl?: number;
+  waitForOwner?: number;
+  pollInterval?: number;
+  onTimeout: "fetch" | "throw";
+}
+
+export interface ResponseCacheDistributedInvalidator {
+  invalidateTag(tag: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface ResponseCacheRuntime {
+  cache: CacheLike;
+  leaseStore?: CacheLeaseStore;
+  lease?: ResolvedResponseCacheLeaseOptions;
+  distributed?: ResponseCacheDistributedInvalidator;
+  close(): Promise<void>;
+}
+
 export interface ResolvedResponseCacheOptions {
+  runtime: ResponseCacheRuntime;
   cache: CacheLike;
   ttl: number;
   namespace: string;
+  namespaceTag: string;
   vary: ResponseCacheVary;
   tags: readonly string[];
   cacheableMethods: ReadonlySet<string>;

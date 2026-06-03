@@ -120,7 +120,7 @@ async function handleProductRequest(req, res) {
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `cacheHub` | `ResponseCacheHubOptions` | `{}` | 传给内部 `cache-hub` `MemoryCache` 的配置。`defaultTtl` 不开放，响应 TTL 统一由 `ttl` 控制。 |
+| `cacheHub` | `ResponseCacheHubOptions` | `{}` | 内部 `cache-hub` Store 配置。不写 `mode` 时使用 Memory；显式设置 `mode: "redis"` 或 `"multi-level"` 可启用 Redis / 多级缓存。`defaultTtl` 不开放，响应 TTL 统一由 `ttl` 控制。 |
 | `ttl` | `number` | `60000` | 缓存 TTL，单位毫秒。`ttl <= 0` 会 bypass 缓存。 |
 | `namespace` | `string` | `"response-cache"` | 缓存 key 前缀。多个模块共用同一个 Store 时建议设置。 |
 | `vary` | `readonly string[] \| "*"` | `[]` | 当某些请求头会改变响应内容时，用这些请求头区分缓存。只有明确需要所有请求头参与 key 时才使用 `"*"`。 |
@@ -149,7 +149,7 @@ const cache = createResponseCache({
 });
 ```
 
-`cacheHub` 字段：
+Memory `cacheHub` 字段：
 
 | 字段 | 类型 | `cache-hub` 默认值 | 说明 |
 |------|------|--------------------|------|
@@ -160,6 +160,96 @@ const cache = createResponseCache({
 | `enabled` | `boolean` | `true` | 设为 `false` 时临时关闭内部 Store 的读写。 |
 
 `cacheHub` 不开放 `defaultTtl` 和 `enableTags`。响应 TTL 属于 `response-cache-kit`；tag 索引由模块内部启用，因此使用者不需要自己配置底层 Store 才能使用 `invalidateTag()`。
+
+Redis 和多级缓存是显式开启能力，并且仍然只通过 `cache-hub` 实现；`response-cache-kit` 不开放外部自定义 Store 注入。
+
+```typescript
+const redisCache = createResponseCache({
+  ttl: 10_000,
+  namespace: "api",
+  cacheHub: {
+    mode: "redis",
+    url: "redis://localhost:6379",
+    metaKeyPrefix: "api:response-cache",
+    scanCount: 200,
+    deleteCommand: "unlink",
+    lease: {
+      ttl: 1_000,
+      waitForOwner: 1_200,
+      pollInterval: 10,
+      onTimeout: "fetch",
+    },
+  },
+});
+
+const multiLevelCache = createResponseCache({
+  ttl: 10_000,
+  namespace: "api",
+  cacheHub: {
+    mode: "multi-level",
+    memory: { maxEntries: 5000 },
+    redis: {
+      url: "redis://localhost:6379",
+      metaKeyPrefix: "api:response-cache",
+    },
+    writePolicy: "both",
+    backfillOnRemoteHit: true,
+    remoteTimeout: 50,
+    lease: true,
+  },
+});
+```
+
+Redis mode 字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | `"redis"` | 必填 | 启用 `cache-hub` Redis adapter。 |
+| `url` | `string` | `"redis://localhost:6379"` | 未传 `client` 时使用的 Redis URL。URL 模式使用 cache-hub 的 optional `ioredis` peer。 |
+| `client` | `object` | 无 | 已有 Redis-like client。生命周期仍由调用方管理。 |
+| `metaKeyPrefix` | `string` | cache-hub 默认值 | tag 元数据 key 前缀。 |
+| `scanCount` | `number` | cache-hub 默认值 | pattern/tag 操作的 SCAN 批大小。 |
+| `deleteCommand` | `"del" \| "unlink"` | `"del"` | cache-hub 使用的 Redis 删除命令。 |
+| `lease` | `boolean \| ResponseCacheHubLeaseOptions` | `false` | 启用 Redis-backed 跨进程刷新协调。 |
+| `distributed` | `boolean \| ResponseCacheHubDistributedOptions` | `false` | 启用 cache-hub 分布式 tag 失效。 |
+
+MultiLevel mode 字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | `"multi-level"` | 必填 | 使用 L1 Memory + L2 Redis。 |
+| `memory` | `ResponseCacheHubMemoryOptions` | `{}` | L1 Memory 配置。 |
+| `redis` | `ResponseCacheHubRedisTargetOptions` | `{}` | L2 Redis 目标与元数据配置。 |
+| `writePolicy` | `"both" \| "local-first-async-remote"` | cache-hub 默认值 | 写入策略。 |
+| `backfillOnRemoteHit` | `boolean` | cache-hub 默认值 | L2 命中时是否回填 L1。 |
+| `remoteTimeout` | `number` | cache-hub 默认值 | L2 读取超时，单位毫秒。 |
+| `remoteInvalidationErrors` | `"ignore" \| "throw"` | cache-hub 默认值 | L2 tag 失效失败时是否抛错。 |
+| `lease` | `boolean \| ResponseCacheHubLeaseOptions` | `false` | 使用 Redis 层做跨进程 lease 协调。 |
+| `distributed` | `boolean \| ResponseCacheHubDistributedOptions` | `false` | 跨实例广播 tag 失效。 |
+
+Lease 字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | `boolean` | 传对象或 `true` 时默认启用 | 设为 `false` 可关闭一份预置 lease 配置。 |
+| `ttl` | `number` | 根据响应 TTL 推导，并限制刷新窗口 | lease TTL，单位毫秒。 |
+| `waitForOwner` | `number` | `leaseTtl + 25` | 非 owner 等待 owner 写入缓存的最长时间。 |
+| `pollInterval` | `number` | `10` | 等待期间检查缓存的间隔。 |
+| `onTimeout` | `"fetch" \| "throw"` | `"fetch"` | 等不到 owner 写入时是自行回源还是抛错。 |
+| `keyPrefix` | `string` | cache-hub 默认值 | Redis lease key 前缀。 |
+| `ownerId` | `string` | cache-hub 自动生成 | lease token 中使用的 owner 前缀。 |
+
+Distributed 字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | `boolean` | 传对象或 `true` 时默认启用 | 设为 `false` 可关闭一份预置 distributed 配置。 |
+| `redisUrl` | `string` | cache-hub 默认值 | 未传 `redis` 对象时用于 pub/sub 的 Redis URL。 |
+| `redis` | `object` | 无 | 已有 Redis-like pub 连接。 |
+| `channel` | `string` | cache-hub 默认值 | 失效消息频道。 |
+| `instanceId` | `string` | cache-hub 自动生成 | 实例标识，用来忽略自己发出的消息。 |
+
+启用 Redis URL 模式或 distributed 失效时，消费应用需要满足 cache-hub 的 optional Redis peer。默认 Memory 模式不会加载或要求 Redis。使用 Redis、MultiLevel 或 distributed 失效时，应用关闭阶段建议调用 `await cache.close?.()`。
 
 ### 缓存多久：`ttl`
 
@@ -231,13 +321,17 @@ const cache = createResponseCache({
 
 ### 底层 cache-hub 配置：`cacheHub`
 
-`cacheHub` 配置内部 `cache-hub` 内存 Store。它不接受外部 Store 实例。
+`cacheHub` 配置内部 `cache-hub` Store。它不接受外部 Store 实例。
 
 - `maxEntries`：最多缓存多少个响应。
 - `maxMemory`：近似内存上限，单位字节；`0` 表示不显式限制。
 - `enableStats`：是否保留 cache-hub Store 统计，便于诊断。
 - `cleanupInterval`：周期清理过期条目的间隔；`0` 表示只在访问时惰性清理。
 - `enabled`：`true` 时正常读写 Store；`false` 时底层 Store 禁用，请求仍会走 `cache.handle()`，但无法形成有效命中。适合本地调试、临时关闭缓存或灰度排查，不建议生产环境长期关闭。
+- `mode: "redis"`：使用 cache-hub Redis adapter 存储响应快照。
+- `mode: "multi-level"`：使用 cache-hub L1 Memory + L2 Redis 多级缓存。
+- `lease`：可选 Redis-backed 跨进程刷新协调。同进程 single-flight 在所有模式下都会保留。
+- `distributed`：可选 cache-hub Pub/Sub tag 失效广播。
 
 ### 高级自定义 key：`keyBuilder`
 
@@ -337,7 +431,7 @@ metadata 状态：
 
 ### `cache.clear()`
 
-清空底层 `cache-hub` Store。
+清理当前响应缓存 `namespace` 写入的条目。每个缓存快照都会带一个内部 namespace tag，因此 Redis 和 MultiLevel 模式会通过 tag 失效清理，不会调用 Redis `flushdb`。如果未来某个底层 Store 不支持 tag 失效，才回退到 Store 自身的 `clear()`。
 
 ### `cache.delete(key)`
 
@@ -355,9 +449,13 @@ metadata 状态：
 
 返回某个 key 的剩余 TTL 毫秒数；永不过期时返回 `null`，key 不存在或无法查询时返回 `undefined`。
 
+### `cache.close?()`
+
+可选生命周期方法。启用 Redis、MultiLevel 或 distributed 失效时，建议在应用关闭阶段调用。Memory 模式也会提供该方法，但公开契约保持 `close` 可选，因此已有手写 mock 不需要强制实现它。
+
 ### `createResponseCacheHeaders(result, options?)`
 
-根据 metadata 生成响应缓存头。默认输出 `X-Cache: HIT` 或 `X-Cache: MISS`。设置 `cacheControl: true` 时，会额外输出 `Cache-Control: public,max-age=N`。
+根据 metadata 生成响应缓存头。默认输出 `X-Cache: HIT` 或 `X-Cache: MISS`。设置 `cacheControl: true` 时，只有结果确实写入了响应缓存，才会额外输出 `Cache-Control: public,max-age=N`。因为 `Set-Cookie`、`private`、`no-store`、TTL bypass 或写缓存失败而没有存储的响应，不会由这个 helper 新增 public `Cache-Control`。
 
 ### adapter helper
 
@@ -577,11 +675,25 @@ async function runVextRoute(req, res, route) {
 - 带 `Authorization` 的请求默认不缓存，除非调用方提供 `partitionKey`。
 - 缓存快照会过滤 hop-by-hop headers。
 - 默认启用同 key single-flight，避免缓存过期瞬间击穿源站。
+- 在 `cacheHub.mode` 为 `"redis"` 或 `"multi-level"` 时，可启用 Redis lease 做跨进程同 key 刷新协调。
 - 内部启用 `cache-hub` tag 索引。
 
 ## 并发过期保护
 
 如果响应缓存配置为 `ttl: 2_000`，并且同一个 key 在过期后同时收到 10000 个请求，只有一个请求会回源刷新，其余请求等待同一个 in-flight promise，并返回同一份刷新后的响应快照。
+
+这个默认保护作用于单个 cache 实例。多进程部署下，如果希望降低跨进程回源风暴，可以开启 Redis lease：
+
+```typescript
+createResponseCache({
+  ttl: 2_000,
+  cacheHub: {
+    mode: "redis",
+    url: "redis://localhost:6379",
+    lease: { waitForOwner: 1_000, onTimeout: "fetch" },
+  },
+});
+```
 
 不同 key 之间互不阻塞。回源失败时不写缓存，后续请求可以重新回源。
 
@@ -663,7 +775,11 @@ createResponseCache({
 
 ### 能接 Redis 或多级缓存吗？
 
-`cache-hub` 是唯一运行时缓存底座。Redis、多级缓存等能力应作为单独的 cache-hub 接入批次设计，不通过 `response-cache-kit` 的外部 Store 配置开放。
+可以。使用 `cacheHub.mode: "redis"` 或 `cacheHub.mode: "multi-level"`。底层仍然只使用 cache-hub；`response-cache-kit` 不接受外部自定义 Store。Redis URL 模式和 distributed 失效依赖 cache-hub 的 optional Redis peer；默认 Memory 模式不需要 Redis。
+
+### 为什么 Redis mode 提示缺少 ioredis？
+
+`response-cache-kit` 的运行时依赖只有 `cache-hub`。Redis 能力由 cache-hub Redis adapter 提供，Redis client 是 optional peer。使用 URL 模式或 distributed 失效时，请在消费应用中安装 Redis peer，或者传入已有 Redis-like `client`。
 
 ### 为什么 `npm run benchmark` 比单测更重？
 

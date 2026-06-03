@@ -32,7 +32,7 @@ describe("adapter helpers", () => {
       status: 200,
       headers: { "content-type": "application/json" },
       body: { ok: true },
-      metadata: { state: "miss", ttl: 1_000, age: 0 },
+      metadata: { state: "miss", ttl: 1_000, age: 0, stored: true },
     };
 
     expect(

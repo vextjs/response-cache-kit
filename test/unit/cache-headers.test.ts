@@ -14,6 +14,7 @@ const baseResult: ResponseCacheResult = {
     state: "hit",
     ttl: 2_000,
     age: 750,
+    stored: true,
   },
 };
 
@@ -68,11 +69,35 @@ describe("cache headers", () => {
     });
   });
 
+  it("omits Cache-Control when a stored result has no ttl metadata", () => {
+    const result: ResponseCacheResult = {
+      ...baseResult,
+      metadata: { state: "hit", stored: true },
+    };
+
+    expect(getMaxAgeSeconds(result)).toBeUndefined();
+    expect(createResponseCacheHeaders(result, { cacheControl: true })).toEqual({
+      "X-Cache": "HIT",
+    });
+  });
+
+  it("omits Cache-Control when the response was not stored", () => {
+    const result: ResponseCacheResult = {
+      ...baseResult,
+      metadata: { state: "miss", ttl: 2_000, age: 0, stored: false },
+    };
+
+    expect(getMaxAgeSeconds(result)).toBeUndefined();
+    expect(createResponseCacheHeaders(result, { cacheControl: true })).toEqual({
+      "X-Cache": "MISS",
+    });
+  });
+
   it("uses zero age when age metadata is missing", () => {
     expect(
       getMaxAgeSeconds({
         ...baseResult,
-        metadata: { state: "miss", ttl: 1_000 },
+        metadata: { state: "miss", ttl: 1_000, stored: true },
       })
     ).toBe(1);
   });
