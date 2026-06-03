@@ -2,8 +2,22 @@
 
 ## 目录导航
 
+- [Unreleased](#unreleased)
+- [1.1.0 - 2026-06-03](#110---2026-06-03)
 - [1.0.1 - 2026-06-03](#101---2026-06-03)
 - [1.0.0 - 2026-06-02](#100---2026-06-02)
+
+## Unreleased
+
+- No unreleased changes.
+
+## 1.1.0 - 2026-06-03
+
+- Add response cache tags, tag invalidation, key deletion, stats, and remaining TTL APIs.
+- Add `X-Cache` / `Cache-Control` header helpers and framework adapter helpers.
+- Add a vext preset for millisecond-based route cache options, readable legacy keys, and 2xx-except-204 status behavior.
+- Support `vary: "*"` for explicit all-request-header key variation.
+- Expand English and Chinese docs with full API, tag invalidation, adapter helpers, framework examples, and vext migration notes.
 
 ## 1.0.1 - 2026-06-03
 

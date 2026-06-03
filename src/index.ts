@@ -2,6 +2,16 @@ export {
   createResponseCache,
 } from "./response-cache.js";
 export {
+  createResponseCacheHeaders,
+  getMaxAgeSeconds,
+  toCacheHeaderValue,
+} from "./cache-headers.js";
+export {
+  createResponseCacheCapture,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "./adapter.js";
+export {
   createResponseCacheKey,
   normalizeUrl,
 } from "./key.js";
@@ -20,11 +30,20 @@ export {
 export {
   SingleFlight,
 } from "./single-flight.js";
+export {
+  VEXT_CACHEABLE_STATUSES,
+  createVextLegacyKey,
+  createVextResponseCacheOptions,
+  secondsToMilliseconds,
+} from "./presets/vext.js";
 export type {
   HeaderBag,
   HeadersLike,
   HeaderValue,
   ResponseCache,
+  ResponseCacheAdapterRequestInput,
+  ResponseCacheCapture,
+  ResponseCacheHeaderOptions,
   ResponseCacheHubOptions,
   ResponseCacheHandleOptions,
   ResponseCacheKeyBuilder,
@@ -35,5 +54,12 @@ export type {
   ResponseCacheRequest,
   ResponseCacheResult,
   ResponseCacheState,
+  ResponseCacheStats,
+  ResponseCacheVary,
+  ResponseCacheWritePayload,
   ResponseSnapshot,
 } from "./types.js";
+export type {
+  VextRouteCacheConfig,
+  VextRouteCacheOptions,
+} from "./presets/vext.js";

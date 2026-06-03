@@ -252,6 +252,63 @@ describe("response cache", () => {
     expect(third.metadata.state).toBe("miss");
   });
 
+  it("supports tags, tag invalidation, delete, remaining ttl, and stats", async () => {
+    const cache = createResponseCache({
+      ttl: 1_000,
+      tags: ["global"],
+      now: () => 100,
+    });
+    const request = { method: "GET", url: "/tagged" };
+    const origin = vi.fn(async () => ({ status: 200, body: "tagged" }));
+
+    const first = await cache.handle(request, origin, { tags: ["products"] });
+    const key = first.metadata.key as string;
+    const second = await cache.handle(request, origin);
+
+    expect(second.metadata.state).toBe("hit");
+    const remainingTtl = await cache.getRemainingTtl(key);
+    expect(typeof remainingTtl).toBe("number");
+    expect(remainingTtl as number).toBeGreaterThan(0);
+    expect(remainingTtl as number).toBeLessThanOrEqual(1_000);
+    expect(cache.stats().entries).toBe(1);
+
+    await cache.invalidateTag("products");
+    const third = await cache.handle(request, origin);
+    expect(third.metadata.state).toBe("miss");
+    expect(origin).toHaveBeenCalledTimes(2);
+
+    await cache.delete(third.metadata.key as string);
+    const fourth = await cache.handle(request, origin);
+    expect(fourth.metadata.state).toBe("miss");
+    expect(origin).toHaveBeenCalledTimes(3);
+  });
+
+  it("returns default stats and ttl when optional store helpers are unavailable", async () => {
+    const cache = createResponseCache({ ttl: 1_000 });
+    const store = cache.getStore() as unknown as {
+      getStats?: undefined;
+      getRemainingTtl?: undefined;
+      invalidateByTag?: undefined;
+    };
+    store.getStats = undefined;
+    store.getRemainingTtl = undefined;
+    store.invalidateByTag = undefined;
+
+    expect(cache.stats()).toEqual({
+      hits: 0,
+      misses: 0,
+      hitRate: 0,
+      entries: 0,
+      evictions: 0,
+      sets: 0,
+      deletes: 0,
+      memoryUsage: 0,
+      memoryUsageMB: 0,
+    });
+    await expect(cache.getRemainingTtl("missing")).resolves.toBeUndefined();
+    await expect(cache.invalidateTag("missing")).resolves.toBeUndefined();
+  });
+
   it("uses default options when no constructor options are provided", async () => {
     const cache = createResponseCache();
     const result = await cache.handle(

@@ -1,4 +1,7 @@
-import { createMemoryResponseCacheStore } from "./store.js";
+import {
+  createMemoryResponseCacheStore,
+  setResponseSnapshot,
+} from "./store.js";
 import { createResponseCacheKey } from "./key.js";
 import {
   DEFAULT_CACHEABLE_METHODS,
@@ -23,6 +26,7 @@ import type {
   ResponseCacheOriginResponse,
   ResponseCacheRequest,
   ResponseCacheResult,
+  ResponseCacheStats,
   ResponseSnapshot,
 } from "./types.js";
 
@@ -101,6 +105,34 @@ class DefaultResponseCache implements ResponseCache {
     await this.options.cache.clear();
   }
 
+  async delete(key: string): Promise<void> {
+    await this.options.cache.del(key);
+  }
+
+  async invalidateTag(tag: string): Promise<void> {
+    await this.options.cache.invalidateByTag?.(tag);
+  }
+
+  stats(): ResponseCacheStats {
+    return (
+      this.options.cache.getStats?.() ?? {
+        hits: 0,
+        misses: 0,
+        hitRate: 0,
+        entries: 0,
+        evictions: 0,
+        sets: 0,
+        deletes: 0,
+        memoryUsage: 0,
+        memoryUsageMB: 0,
+      }
+    );
+  }
+
+  async getRemainingTtl(key: string): Promise<number | null | undefined> {
+    return this.options.cache.getRemainingTtl?.(key);
+  }
+
   getStore() {
     return this.options.cache;
   }
@@ -139,7 +171,13 @@ class DefaultResponseCache implements ResponseCache {
     }
 
     try {
-      await options.cache.set(key, snapshot, options.ttl);
+      await setResponseSnapshot(
+        options.cache,
+        key,
+        snapshot,
+        options.ttl,
+        options.tags
+      );
       return { response, snapshot, stored: true };
     } catch {
       return {
@@ -165,6 +203,7 @@ function resolveOptions(options: ResponseCacheOptions): ResolvedResponseCacheOpt
     ttl,
     namespace,
     vary: options.vary ?? [],
+    tags: options.tags ?? [],
     cacheableMethods: new Set(
       (options.cacheableMethods ?? DEFAULT_CACHEABLE_METHODS).map((method) =>
         method.toUpperCase()
@@ -193,6 +232,7 @@ function mergeHandleOptions(
     ttl: overrides.ttl ?? base.ttl,
     namespace: overrides.namespace ?? base.namespace,
     vary: overrides.vary ?? base.vary,
+    tags: mergeTags(base.tags, overrides.tags),
     cacheableMethods: overrides.cacheableMethods
       ? new Set(overrides.cacheableMethods.map((method) => method.toUpperCase()))
       : base.cacheableMethods,
@@ -210,6 +250,16 @@ function mergeHandleOptions(
   }
 
   return merged;
+}
+
+function mergeTags(
+  base: readonly string[],
+  overrides?: readonly string[]
+): readonly string[] {
+  if (!overrides) {
+    return base;
+  }
+  return Array.from(new Set([...base, ...overrides]));
 }
 
 function createMissMetadata(

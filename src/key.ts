@@ -14,14 +14,22 @@ export function createResponseCacheKey(
 ): string {
   const namespace = options.namespace ?? "response-cache";
   const vary = options.vary ?? [];
+  const headers = normalizeHeaders(request.headers);
+  const varyAllHeaders = vary === "*";
+  const varyNames = varyAllHeaders
+    ? Object.keys(headers).sort()
+    : Array.from(vary);
 
   if (options.keyBuilder) {
-    return options.keyBuilder(request, { namespace, vary });
+    return options.keyBuilder(request, {
+      namespace,
+      vary: varyNames,
+      varyAllHeaders,
+    });
   }
 
-  const headers = normalizeHeaders(request.headers);
   const varyHeaders: Record<string, string> = {};
-  for (const rawName of vary) {
+  for (const rawName of varyNames) {
     const name = rawName.toLowerCase();
     const value = headers[name];
     if (value !== undefined) {

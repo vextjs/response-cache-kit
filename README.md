@@ -1,24 +1,27 @@
 # response-cache-kit
 
-Framework-agnostic response caching toolkit for Node.js services.
+vext-first response caching toolkit for Node.js services.
 
-`response-cache-kit` is part of the vext ecosystem. It uses `cache-hub` as the
-default and only runtime caching dependency, while keeping the response cache
-core independent from any specific web framework.
+`response-cache-kit` is part of the vext ecosystem. Its first acceptance target
+is replacing vext response caching, while keeping the core independent from any
+specific web framework. Express, Fastify, Hono, native HTTP, and future vext
+adapters should reuse the same helpers instead of copying cache plumbing.
 
 Chinese documentation: [docs/README.zh-CN.md](./docs/README.zh-CN.md)
 
-## 目录导航
+## Table of Contents
 
 - [Install](#install)
 - [Quick Start](#quick-start)
 - [Complete Configuration Example](#complete-configuration-example)
 - [Configuration](#configuration)
 - [Per-Route Overrides](#per-route-overrides)
+- [Tags And Invalidation](#tags-and-invalidation)
 - [API Reference](#api-reference)
 - [Framework Integration Examples](#framework-integration-examples)
 - [Defaults](#defaults)
 - [Concurrent Expiry Protection](#concurrent-expiry-protection)
+- [vext Migration Notes](#vext-migration-notes)
 - [Future Batches](#future-batches)
 - [Scripts](#scripts)
 - [Troubleshooting](#troubleshooting)
@@ -33,7 +36,10 @@ npm install response-cache-kit
 ## Quick Start
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
@@ -53,6 +59,9 @@ const result = await cache.handle(
 );
 
 console.log(result.metadata.state); // miss, hit, deduped, bypass, or error
+console.log(
+  createResponseCacheWritePayload(result, { cacheControl: true }).headers
+); // includes X-Cache and Cache-Control
 ```
 
 The package caches response snapshots: status, headers, body, TTL, and cache
@@ -69,7 +78,11 @@ variants for language and tenant region, per-request user or tenant isolation,
 and cache metadata written back to the response.
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const responseCache = createResponseCache({
   ttl: 30_000,
@@ -89,21 +102,27 @@ async function handleProductRequest(req, res) {
     tenantId && userId ? `tenant:${tenantId}:user:${userId}` : undefined;
 
   const result = await responseCache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: req.method,
       url: req.originalUrl ?? req.url,
       headers: req.headers,
       ...(partitionKey ? { partitionKey } : {}),
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
       body: await loadProduct(req.params.id),
-    })
+    }),
+    { tags: ["products"] }
   );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
 
-  res.setHeader("x-response-cache", result.metadata.state);
-  res.status(result.status).send(result.body);
+  for (const [name, value] of Object.entries(payload.headers)) {
+    res.setHeader(name, value);
+  }
+  res.status(payload.status).send(payload.body);
 }
 ```
 
@@ -120,12 +139,13 @@ organization, or session IDs.
 | `cacheHub` | `ResponseCacheHubOptions` | `{}` | Options passed to the internal `cache-hub` `MemoryCache`. `defaultTtl` is not exposed because response TTL is controlled by `ttl`. |
 | `ttl` | `number` | `60000` | Cache TTL in milliseconds. `ttl <= 0` bypasses caching. |
 | `namespace` | `string` | `"response-cache"` | Prefix used when building cache keys. Useful when sharing one store across modules. |
-| `vary` | `readonly string[]` | `[]` | Header names that separate cache entries when those headers change the response. |
+| `vary` | `readonly string[] \| "*"` | `[]` | Header names that separate cache entries when those headers change the response. Use `"*"` only when every request header intentionally participates in the key. |
+| `tags` | `readonly string[]` | `[]` | Tags written with stored responses. Use `cache.invalidateTag(tag)` after business data changes. |
 | `cacheableMethods` | `readonly string[]` | `["GET", "HEAD"]` | Methods eligible for caching. Values are normalized to uppercase. |
 | `cacheableStatuses` | `readonly number[]` | `[200, 203, 204, 206, 300, 301, 404, 410]` | Response statuses eligible for storage. |
 | `allowAuthorizationCache` | `boolean` | `false` | Allows caching requests with `Authorization`. Prefer `partitionKey` for user/tenant separation. |
 | `now` | `() => number` | `Date.now` | Clock function, mainly for tests and deterministic benchmarks. |
-| `keyBuilder` | `ResponseCacheKeyBuilder` | built-in SHA-256 key builder | Advanced cache key builder. Receives the request plus `namespace` and `vary`. |
+| `keyBuilder` | `ResponseCacheKeyBuilder` | built-in SHA-256 key builder | Advanced cache key builder. Receives the request plus `namespace`, resolved `vary`, and `varyAllHeaders`. |
 
 `cacheHub` is intentionally a configuration object, not a way to pass your own
 store instance. `response-cache-kit` creates the underlying `cache-hub` store
@@ -158,7 +178,8 @@ const cache = createResponseCache({
 | `enabled` | `boolean` | `true` | Temporarily disables reads and writes in the internal store when set to `false`. |
 
 `defaultTtl` and `enableTags` are not exposed in `cacheHub`. Response TTL belongs
-to `response-cache-kit`, and tag invalidation is reserved for a later batch.
+to `response-cache-kit`; tag indexes are enabled internally so response tags and
+`invalidateTag()` work without user store wiring.
 
 ### Cache Lifetime: `ttl`
 
@@ -175,7 +196,7 @@ Examples: `"products-api"`, `"admin-api"`, or `"staging-products-api"`.
 
 ### Header Variants: `vary`
 
-`vary` accepts any request header name. Header names are matched
+`vary` accepts request header names. Header names are matched
 case-insensitively. Only add headers that truly change the response body or
 headers.
 
@@ -197,6 +218,12 @@ Avoid:
 
 If a response changes by language and `vary` does not include
 `accept-language`, different languages may share the same cached response.
+
+Use `vary: "*"` only when all request headers are part of your response
+contract. It is convenient for strict internal adapters, but dangerous for public
+traffic because request IDs, trace IDs, dates, cookies, or authorization-like
+headers can produce a near-zero hit rate or leak sensitive key material through a
+custom key builder. Prefer an explicit allowlist for normal applications.
 
 ### User and Tenant Isolation: `partitionKey`
 
@@ -271,6 +298,39 @@ format. If you provide it, make sure your key includes every piece of data that
 can change the response: URL, normalized query, selected `vary` headers, and
 `partitionKey`.
 
+## Tags And Invalidation
+
+Tags are a framework-neutral way to invalidate many response entries after a
+business change. Tags can be configured globally and per call; per-call tags are
+added to global tags.
+
+```typescript
+const cache = createResponseCache({
+  ttl: 60_000,
+  tags: ["catalog"],
+});
+
+await cache.handle(
+  { method: "GET", url: "/products/42" },
+  loadProductResponse,
+  { tags: ["product:42"] }
+);
+
+await cache.invalidateTag("product:42");
+```
+
+Use readable keys when you want targeted deletion:
+
+```typescript
+const key = cache.makeKey({ method: "GET", url: "/products/42" });
+await cache.delete(key);
+```
+
+`cache.stats()` exposes the internal `cache-hub` counters, and
+`cache.getRemainingTtl(key)` returns the remaining TTL in milliseconds,
+`null` for a non-expiring key, or `undefined` when the key is missing or the
+store cannot report TTL.
+
 ## Per-Route Overrides
 
 Global options apply to most routes. Per-route overrides are for endpoints that
@@ -340,6 +400,52 @@ Builds the cache key without reading or writing the store.
 
 Clears the underlying `cache-hub` store.
 
+### `cache.delete(key)`
+
+Deletes one response cache entry by key. The default key is hashed; if your
+framework needs human-readable deletion keys, provide a `keyBuilder` or use a
+preset such as `createVextResponseCacheOptions()`.
+
+### `cache.invalidateTag(tag)`
+
+Invalidates all entries written with the given tag.
+
+### `cache.stats()`
+
+Returns `cache-hub` statistics such as `entries`, `hits`, `misses`, `hitRate`,
+`sets`, `deletes`, and memory counters.
+
+### `cache.getRemainingTtl(key)`
+
+Returns the remaining TTL in milliseconds, `null` for a non-expiring key, or
+`undefined` when the key is missing or TTL lookup is unavailable.
+
+### `createResponseCacheHeaders(result, options?)`
+
+Creates response cache headers from metadata. By default it emits `X-Cache:
+HIT` for hits and `X-Cache: MISS` for miss-like states. Set
+`cacheControl: true` to also emit `Cache-Control: public,max-age=N`.
+
+### Adapter helpers
+
+Use these helpers in framework adapters:
+
+| Helper | Purpose |
+|--------|---------|
+| `normalizeResponseCacheRequest(input)` | Converts framework request fields into `ResponseCacheRequest`. |
+| `createResponseCacheWritePayload(result, options?)` | Merges cached response headers with `X-Cache` / `Cache-Control` helper output. |
+| `createResponseCacheCapture(initial?)` | Captures status, headers, and body for adapters that intercept framework sends. |
+
+### vext preset helpers
+
+`createVextResponseCacheOptions(routeCacheConfig, base?)` converts vext-style
+`cache: false | number | { ttl, vary, tags, key, condition }` configuration to
+`ResponseCacheHandleOptions`. Number and object `ttl` values are milliseconds.
+`condition` remains an adapter-side decision: when it
+returns `false`, skip `cache.handle()` and call the route handler directly.
+`createVextLegacyKey()` produces readable keys such as `GET:/products/42` so a
+vext adapter can keep `app.cache.delete(key)` ergonomic.
+
 ### `cache.getStore()`
 
 Returns the underlying `cache-hub` store for diagnostics or explicit lifecycle
@@ -355,37 +461,47 @@ returned status, headers, body, and metadata back to the framework response.
 
 ```typescript
 import { createServer } from "node:http";
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
 createServer(async (req, res) => {
   const result = await cache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: req.method,
       url: req.url ?? "/",
       headers: req.headers,
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ok: true }),
     })
   );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
 
-  res.statusCode = result.status;
-  for (const [name, value] of Object.entries(result.headers)) {
+  res.statusCode = payload.status;
+  for (const [name, value] of Object.entries(payload.headers)) {
     res.setHeader(name, value);
   }
-  res.setHeader("x-response-cache", result.metadata.state);
-  res.end(String(result.body));
+  res.end(String(payload.body));
 }).listen(3000);
 ```
 
 ### Express-Style Middleware
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
@@ -394,21 +510,23 @@ export function responseCacheMiddleware(fetchOrigin) {
     try {
       const partitionKey = req.user?.id;
       const result = await cache.handle(
-        {
+        normalizeResponseCacheRequest({
           method: req.method,
           url: req.originalUrl ?? req.url,
           headers: req.headers,
           ...(partitionKey ? { partitionKey } : {}),
-        },
+        }),
         () => fetchOrigin(req)
       );
+      const payload = createResponseCacheWritePayload(result, {
+        cacheControl: true,
+      });
 
-      res.status(result.status);
-      for (const [name, value] of Object.entries(result.headers)) {
+      res.status(payload.status);
+      for (const [name, value] of Object.entries(payload.headers)) {
         res.setHeader(name, value);
       }
-      res.setHeader("x-response-cache", result.metadata.state);
-      res.send(result.body);
+      res.send(payload.body);
     } catch (error) {
       next(error);
     }
@@ -419,47 +537,57 @@ export function responseCacheMiddleware(fetchOrigin) {
 ### Fastify-Style Handler
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
 fastify.get("/products/:id", async (request, reply) => {
   const result = await cache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: request.method,
       url: request.url,
       headers: request.headers,
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
       body: await loadProduct(request.params.id),
     })
   );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
 
-  reply.code(result.status);
-  for (const [name, value] of Object.entries(result.headers)) {
+  reply.code(payload.status);
+  for (const [name, value] of Object.entries(payload.headers)) {
     reply.header(name, value);
   }
-  reply.header("x-response-cache", result.metadata.state);
-  return result.body;
+  return payload.body;
 });
 ```
 
 ### Hono-Style Handler
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheHeaders,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
 app.get("/products/:id", async (c) => {
   const result = await cache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: c.req.method,
       url: c.req.url,
       headers: c.req.raw.headers,
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
@@ -467,9 +595,50 @@ app.get("/products/:id", async (c) => {
     })
   );
 
-  c.header("x-response-cache", result.metadata.state);
+  for (const [name, value] of Object.entries(createResponseCacheHeaders(result))) {
+    c.header(name, value);
+  }
   return c.json(result.body, result.status);
 });
+```
+
+### vext-style adapter preset
+
+```typescript
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  createVextResponseCacheOptions,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
+
+const cache = createResponseCache({ namespace: "vext" });
+
+async function runVextRoute(req, res, route) {
+  const routeCache = createVextResponseCacheOptions(route.cache);
+  if (routeCache === false || route.cache?.condition?.(req) === false) {
+    return route.handler(req, res);
+  }
+
+  const result = await cache.handle(
+    normalizeResponseCacheRequest({
+      method: req.method,
+      url: req.url,
+      headers: req.headers,
+      partitionKey: req.user?.id ? `user:${req.user.id}` : undefined,
+    }),
+    () => route.handler(req, res),
+    routeCache
+  );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
+
+  for (const [name, value] of Object.entries(payload.headers)) {
+    res.setHeader(name, value);
+  }
+  return res.status(payload.status).send(payload.body);
+}
 ```
 
 ## Defaults
@@ -480,6 +649,7 @@ app.get("/products/:id", async (c) => {
 - Skips `Authorization` requests unless a `partitionKey` is provided.
 - Filters hop-by-hop headers from cached snapshots.
 - Uses same-key single-flight protection for concurrent refreshes.
+- Enables cache-hub tag indexes internally.
 
 ## Concurrent Expiry Protection
 
@@ -490,18 +660,30 @@ the same in-flight refresh and return the same updated response snapshot.
 Different keys are independent. Failed origin refreshes are not cached, and a
 later request can retry.
 
+## vext Migration Notes
+
+vext can keep its public `cache: false | number | RouteCacheOptions` shape by
+normalizing route options with `createVextResponseCacheOptions()`.
+
+| vext behavior | response-cache-kit support |
+|---------------|----------------------------|
+| `cache: false` | `createVextResponseCacheOptions(false)` returns `false`. |
+| `cache: number` | Number is treated as milliseconds. |
+| `ttl` object option | Object `ttl` is treated as milliseconds. |
+| `vary` | Passed to `vary`, including explicit `vary: "*"` when needed. |
+| `tags` | Written to cache-hub tag indexes and invalidated through `invalidateTag()`. |
+| readable deletion key | `createVextLegacyKey()` returns keys like `GET:/products`. |
+| `X-Cache` / `Cache-Control` | `createResponseCacheWritePayload(result, { cacheControl: true })`. |
+| 204 / non-2xx bypass | `VEXT_CACHEABLE_STATUSES` includes 2xx statuses except 204. |
+
 ## Future Batches
 
-`stale-while-revalidate` and tag invalidation are intentionally not part of the
-first batch.
+`stale-while-revalidate` is intentionally not part of this batch.
 
 - `stale-while-revalidate`: return stale data during a stale window while one
   background refresh updates the cache.
-- `tag invalidation`: attach tags to cache entries and invalidate entries by tag
-  after business data changes.
 
-Both features need separate API and failure-semantics decisions before they are
-implemented.
+It needs separate API and failure-semantics decisions before implementation.
 
 ## Scripts
 

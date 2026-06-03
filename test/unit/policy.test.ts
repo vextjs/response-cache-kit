@@ -13,6 +13,7 @@ const baseOptions = {
   ttl: 1_000,
   namespace: "test",
   vary: [],
+  tags: [],
   cacheableMethods: new Set(DEFAULT_CACHEABLE_METHODS),
   cacheableStatuses: new Set(DEFAULT_CACHEABLE_STATUSES),
   allowAuthorizationCache: false,

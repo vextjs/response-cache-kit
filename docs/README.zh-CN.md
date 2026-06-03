@@ -1,6 +1,6 @@
 # response-cache-kit 中文文档
 
-`response-cache-kit` 是面向 Node.js 服务的框架无关响应缓存工具包，属于 vext 生态的一部分。它默认并且只依赖 `cache-hub` 作为运行时缓存底座，但核心 API 不绑定任何 Web 框架。
+`response-cache-kit` 是 vext 优先的 Node.js 响应缓存工具包，属于 vext 生态的一部分。它的第一验收目标是未来替换 vext 当前响应缓存，同时保持核心 API 不绑定任何 Web 框架。Express、Fastify、Hono、Node 原生 HTTP 和后续 vext adapter 都应复用模块 helper，而不是复制复杂缓存接线代码。
 
 ## 目录导航
 
@@ -9,10 +9,12 @@
 - [完整配置示例](#完整配置示例)
 - [配置说明](#配置说明)
 - [单路由覆盖配置](#单路由覆盖配置)
+- [标签与失效](#标签与失效)
 - [API 参考](#api-参考)
 - [框架接入示例](#框架接入示例)
 - [默认策略](#默认策略)
 - [并发过期保护](#并发过期保护)
+- [vext 迁移说明](#vext-迁移说明)
 - [后续批次能力](#后续批次能力)
 - [测试与压测](#测试与压测)
 - [常见问题](#常见问题)
@@ -27,7 +29,10 @@ npm install response-cache-kit
 ## 快速开始
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
@@ -45,6 +50,9 @@ const result = await cache.handle(
 );
 
 console.log(result.metadata.state); // miss / hit / deduped / bypass / error
+console.log(
+  createResponseCacheWritePayload(result, { cacheControl: true }).headers
+); // 包含 X-Cache 和 Cache-Control
 ```
 
 这个包缓存的是响应快照：status、headers、body、TTL 和 metadata。路由或框架适配层只负责决定何时调用它。
@@ -56,7 +64,11 @@ console.log(result.metadata.state); // miss / hit / deduped / bypass / error
 下面是一个更接近生产接入的例子：全局创建一个响应缓存实例，按语言和租户区域区分缓存，对用户或租户响应传入隔离 key，并把缓存状态写回响应头。
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const responseCache = createResponseCache({
   ttl: 30_000,
@@ -76,21 +88,27 @@ async function handleProductRequest(req, res) {
     tenantId && userId ? `tenant:${tenantId}:user:${userId}` : undefined;
 
   const result = await responseCache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: req.method,
       url: req.originalUrl ?? req.url,
       headers: req.headers,
       ...(partitionKey ? { partitionKey } : {}),
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
       body: await loadProduct(req.params.id),
-    })
+    }),
+    { tags: ["products"] }
   );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
 
-  res.setHeader("x-response-cache", result.metadata.state);
-  res.status(result.status).send(result.body);
+  for (const [name, value] of Object.entries(payload.headers)) {
+    res.setHeader(name, value);
+  }
+  res.status(payload.status).send(payload.body);
 }
 ```
 
@@ -105,12 +123,13 @@ async function handleProductRequest(req, res) {
 | `cacheHub` | `ResponseCacheHubOptions` | `{}` | 传给内部 `cache-hub` `MemoryCache` 的配置。`defaultTtl` 不开放，响应 TTL 统一由 `ttl` 控制。 |
 | `ttl` | `number` | `60000` | 缓存 TTL，单位毫秒。`ttl <= 0` 会 bypass 缓存。 |
 | `namespace` | `string` | `"response-cache"` | 缓存 key 前缀。多个模块共用同一个 Store 时建议设置。 |
-| `vary` | `readonly string[]` | `[]` | 当某些请求头会改变响应内容时，用这些请求头区分缓存。 |
+| `vary` | `readonly string[] \| "*"` | `[]` | 当某些请求头会改变响应内容时，用这些请求头区分缓存。只有明确需要所有请求头参与 key 时才使用 `"*"`。 |
+| `tags` | `readonly string[]` | `[]` | 写入缓存时附加的标签。业务数据变更后可用 `cache.invalidateTag(tag)` 失效。 |
 | `cacheableMethods` | `readonly string[]` | `["GET", "HEAD"]` | 允许缓存的方法，会自动转为大写。 |
 | `cacheableStatuses` | `readonly number[]` | `[200, 203, 204, 206, 300, 301, 404, 410]` | 允许写入缓存的响应状态码。 |
 | `allowAuthorizationCache` | `boolean` | `false` | 是否允许缓存带 `Authorization` 的请求。更推荐使用 `partitionKey` 做用户/租户隔离。 |
 | `now` | `() => number` | `Date.now` | 时钟函数，主要用于测试和确定性 benchmark。 |
-| `keyBuilder` | `ResponseCacheKeyBuilder` | 内置 SHA-256 key builder | 高级缓存 key 构建器。会收到 request、`namespace` 和 `vary`。 |
+| `keyBuilder` | `ResponseCacheKeyBuilder` | 内置 SHA-256 key builder | 高级缓存 key 构建器。会收到 request、`namespace`、解析后的 `vary` 和 `varyAllHeaders`。 |
 
 `cacheHub` 是配置对象，不是传入外部 Store 实例的入口。`response-cache-kit` 会在内部创建并使用 `cache-hub` Store。
 
@@ -140,7 +159,7 @@ const cache = createResponseCache({
 | `cleanupInterval` | `number` | `0` | 周期清理间隔，单位毫秒。`0` 表示只做惰性清理。 |
 | `enabled` | `boolean` | `true` | 设为 `false` 时临时关闭内部 Store 的读写。 |
 
-`cacheHub` 不开放 `defaultTtl` 和 `enableTags`。响应 TTL 属于 `response-cache-kit`，tag invalidation 保留到后续批次单独设计。
+`cacheHub` 不开放 `defaultTtl` 和 `enableTags`。响应 TTL 属于 `response-cache-kit`；tag 索引由模块内部启用，因此使用者不需要自己配置底层 Store 才能使用 `invalidateTag()`。
 
 ### 缓存多久：`ttl`
 
@@ -152,7 +171,7 @@ const cache = createResponseCache({
 
 ### 按请求头区分缓存：`vary`
 
-`vary` 接受任意请求头名称，大小写不敏感。但不建议随便加 header，只应该加入确实会改变响应内容的请求头。
+`vary` 接受请求头名称，大小写不敏感。但不建议随便加 header，只应该加入确实会改变响应内容的请求头。
 
 推荐场景：
 
@@ -168,6 +187,8 @@ const cache = createResponseCache({
 - 高基数 header，否则几乎每次请求都会生成一个新的缓存 key。
 
 如果响应会因语言不同而不同，却没有把 `accept-language` 放进 `vary`，不同语言请求可能共用同一份缓存。
+
+`vary: "*"` 表示所有请求头都参与缓存 key。这个配置只适合你非常明确地把“所有 header”视为响应合同的一部分的内部 adapter。公开流量中通常不推荐，因为 request id、trace id、时间、cookie 等高基数字段会让命中率接近 0；如果自定义 keyBuilder 直接拼接 header，还可能暴露敏感信息。常规业务优先使用明确 header 白名单。
 
 ### 按用户/租户隔离缓存：`partitionKey`
 
@@ -221,6 +242,34 @@ const cache = createResponseCache({
 ### 高级自定义 key：`keyBuilder`
 
 `keyBuilder` 是高级逃生口，适合团队已经有统一缓存 key 规范的场景。自定义后，你需要自己把所有影响响应的因素放进 key，例如 URL、规范化 query、`vary` 请求头和 `partitionKey`。
+
+## 标签与失效
+
+tags 是框架无关的批量失效能力。全局 tags 和单次调用 tags 会合并写入底层 `cache-hub` tag 索引。
+
+```typescript
+const cache = createResponseCache({
+  ttl: 60_000,
+  tags: ["catalog"],
+});
+
+await cache.handle(
+  { method: "GET", url: "/products/42" },
+  loadProductResponse,
+  { tags: ["product:42"] }
+);
+
+await cache.invalidateTag("product:42");
+```
+
+如果只想删除单个 key，可以先构造 key 再删除：
+
+```typescript
+const key = cache.makeKey({ method: "GET", url: "/products/42" });
+await cache.delete(key);
+```
+
+`cache.stats()` 返回底层 `cache-hub` 统计，例如 `entries`、`hits`、`misses`、`hitRate`。`cache.getRemainingTtl(key)` 返回剩余 TTL 毫秒数；如果 key 永不过期返回 `null`，key 不存在或底层不支持 TTL 查询时返回 `undefined`。
 
 ## 单路由覆盖配置
 
@@ -290,6 +339,40 @@ metadata 状态：
 
 清空底层 `cache-hub` Store。
 
+### `cache.delete(key)`
+
+按 key 删除单个响应缓存。默认 key 是 hash；如果框架需要用户可读的删除 key，可以提供 `keyBuilder`，或使用 vext preset 中的 `createVextLegacyKey()`。
+
+### `cache.invalidateTag(tag)`
+
+删除所有带有指定 tag 的响应缓存。
+
+### `cache.stats()`
+
+返回底层 `cache-hub` 统计信息，包括 `entries`、`hits`、`misses`、`hitRate`、`sets`、`deletes` 和内存计数。
+
+### `cache.getRemainingTtl(key)`
+
+返回某个 key 的剩余 TTL 毫秒数；永不过期时返回 `null`，key 不存在或无法查询时返回 `undefined`。
+
+### `createResponseCacheHeaders(result, options?)`
+
+根据 metadata 生成响应缓存头。默认输出 `X-Cache: HIT` 或 `X-Cache: MISS`。设置 `cacheControl: true` 时，会额外输出 `Cache-Control: public,max-age=N`。
+
+### adapter helper
+
+框架 adapter 优先使用这些 helper，减少重复接线：
+
+| Helper | 用途 |
+|--------|------|
+| `normalizeResponseCacheRequest(input)` | 把框架请求字段转为 `ResponseCacheRequest`。 |
+| `createResponseCacheWritePayload(result, options?)` | 合并原始响应头、`X-Cache` 和 `Cache-Control`。 |
+| `createResponseCacheCapture(initial?)` | 用于 `_onSend` 或类似机制捕获 status、headers、body。 |
+
+### vext preset helper
+
+`createVextResponseCacheOptions(routeCacheConfig, base?)` 把 vext 风格的 `cache: false | number | { ttl, vary, tags, key, condition }` 转为 `ResponseCacheHandleOptions`。其中 number 和对象里的 `ttl` 都按毫秒理解。`condition` 仍由 adapter 判断：返回 `false` 时直接跳过 `cache.handle()` 并执行原 handler。`createVextLegacyKey()` 会生成 `GET:/products/42` 这类可读 key，方便 vext adapter 保持 `app.cache.delete(key)` 的使用体验。
+
 ### `cache.getStore()`
 
 返回底层 `cache-hub` Store，用于诊断或显式生命周期操作。
@@ -306,37 +389,47 @@ metadata 状态：
 
 ```typescript
 import { createServer } from "node:http";
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
 createServer(async (req, res) => {
   const result = await cache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: req.method,
       url: req.url ?? "/",
       headers: req.headers,
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ok: true }),
     })
   );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
 
-  res.statusCode = result.status;
-  for (const [name, value] of Object.entries(result.headers)) {
+  res.statusCode = payload.status;
+  for (const [name, value] of Object.entries(payload.headers)) {
     res.setHeader(name, value);
   }
-  res.setHeader("x-response-cache", result.metadata.state);
-  res.end(String(result.body));
+  res.end(String(payload.body));
 }).listen(3000);
 ```
 
 ### Express 风格中间件
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
@@ -345,21 +438,23 @@ export function responseCacheMiddleware(fetchOrigin) {
     try {
       const partitionKey = req.user?.id;
       const result = await cache.handle(
-        {
+        normalizeResponseCacheRequest({
           method: req.method,
           url: req.originalUrl ?? req.url,
           headers: req.headers,
           ...(partitionKey ? { partitionKey } : {}),
-        },
+        }),
         () => fetchOrigin(req)
       );
+      const payload = createResponseCacheWritePayload(result, {
+        cacheControl: true,
+      });
 
-      res.status(result.status);
-      for (const [name, value] of Object.entries(result.headers)) {
+      res.status(payload.status);
+      for (const [name, value] of Object.entries(payload.headers)) {
         res.setHeader(name, value);
       }
-      res.setHeader("x-response-cache", result.metadata.state);
-      res.send(result.body);
+      res.send(payload.body);
     } catch (error) {
       next(error);
     }
@@ -370,47 +465,57 @@ export function responseCacheMiddleware(fetchOrigin) {
 ### Fastify 风格 Handler
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
 fastify.get("/products/:id", async (request, reply) => {
   const result = await cache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: request.method,
       url: request.url,
       headers: request.headers,
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
       body: await loadProduct(request.params.id),
     })
   );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
 
-  reply.code(result.status);
-  for (const [name, value] of Object.entries(result.headers)) {
+  reply.code(payload.status);
+  for (const [name, value] of Object.entries(payload.headers)) {
     reply.header(name, value);
   }
-  reply.header("x-response-cache", result.metadata.state);
-  return result.body;
+  return payload.body;
 });
 ```
 
 ### Hono 风格 Handler
 
 ```typescript
-import { createResponseCache } from "response-cache-kit";
+import {
+  createResponseCache,
+  createResponseCacheHeaders,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
 
 const cache = createResponseCache({ ttl: 2_000 });
 
 app.get("/products/:id", async (c) => {
   const result = await cache.handle(
-    {
+    normalizeResponseCacheRequest({
       method: c.req.method,
       url: c.req.url,
       headers: c.req.raw.headers,
-    },
+    }),
     async () => ({
       status: 200,
       headers: { "content-type": "application/json" },
@@ -418,9 +523,50 @@ app.get("/products/:id", async (c) => {
     })
   );
 
-  c.header("x-response-cache", result.metadata.state);
+  for (const [name, value] of Object.entries(createResponseCacheHeaders(result))) {
+    c.header(name, value);
+  }
   return c.json(result.body, result.status);
 });
+```
+
+### vext 风格 adapter preset
+
+```typescript
+import {
+  createResponseCache,
+  createResponseCacheWritePayload,
+  createVextResponseCacheOptions,
+  normalizeResponseCacheRequest,
+} from "response-cache-kit";
+
+const cache = createResponseCache({ namespace: "vext" });
+
+async function runVextRoute(req, res, route) {
+  const routeCache = createVextResponseCacheOptions(route.cache);
+  if (routeCache === false || route.cache?.condition?.(req) === false) {
+    return route.handler(req, res);
+  }
+
+  const result = await cache.handle(
+    normalizeResponseCacheRequest({
+      method: req.method,
+      url: req.url,
+      headers: req.headers,
+      partitionKey: req.user?.id ? `user:${req.user.id}` : undefined,
+    }),
+    () => route.handler(req, res),
+    routeCache
+  );
+  const payload = createResponseCacheWritePayload(result, {
+    cacheControl: true,
+  });
+
+  for (const [name, value] of Object.entries(payload.headers)) {
+    res.setHeader(name, value);
+  }
+  return res.status(payload.status).send(payload.body);
+}
 ```
 
 ## 默认策略
@@ -431,6 +577,7 @@ app.get("/products/:id", async (c) => {
 - 带 `Authorization` 的请求默认不缓存，除非调用方提供 `partitionKey`。
 - 缓存快照会过滤 hop-by-hop headers。
 - 默认启用同 key single-flight，避免缓存过期瞬间击穿源站。
+- 内部启用 `cache-hub` tag 索引。
 
 ## 并发过期保护
 
@@ -438,14 +585,28 @@ app.get("/products/:id", async (c) => {
 
 不同 key 之间互不阻塞。回源失败时不写缓存，后续请求可以重新回源。
 
+## vext 迁移说明
+
+vext 可以继续保留用户侧 `cache: false | number | RouteCacheOptions` 形态，由 adapter 使用 `createVextResponseCacheOptions()` 归一化。
+
+| vext 行为 | response-cache-kit 支持 |
+|-----------|--------------------------|
+| `cache: false` | `createVextResponseCacheOptions(false)` 返回 `false`。 |
+| `cache: number` | number 按毫秒处理。 |
+| 对象 `ttl` | 对象里的 `ttl` 同样按毫秒处理。 |
+| `vary` | 传给核心 `vary`，必要时可显式使用 `vary: "*"`。 |
+| `tags` | 写入 `cache-hub` tag 索引，并通过 `invalidateTag()` 失效。 |
+| 可读删除 key | `createVextLegacyKey()` 生成 `GET:/products` 这类 key。 |
+| `X-Cache` / `Cache-Control` | `createResponseCacheWritePayload(result, { cacheControl: true })`。 |
+| 204 / 非 2xx 不缓存 | `VEXT_CACHEABLE_STATUSES` 包含除 204 外的 2xx。 |
+
 ## 后续批次能力
 
-`stale-while-revalidate` 和 tag invalidation 不在首批实现范围内。
+`stale-while-revalidate` 不在当前批次实现范围内。
 
 - `stale-while-revalidate`：fresh TTL 过期后，在 stale window 内先返回旧值，同时后台刷新。
-- tag invalidation：写缓存时记录 tag，业务数据变更后按 tag 批量失效。
 
-这两个能力需要单独确认 API、失败语义、测试与压测策略后再实现。
+它需要单独确认 API、失败语义、测试与压测策略后再实现。
 
 ## 测试与压测
 

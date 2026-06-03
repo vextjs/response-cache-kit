@@ -46,10 +46,42 @@ describe("createResponseCacheKey", () => {
           namespace: "test",
           vary: ["accept"],
           keyBuilder: (_request, context) =>
-            `${context.namespace}:${context.vary.join(",")}`,
+            `${context.namespace}:${context.vary.join(",")}:${context.varyAllHeaders}`,
         }
       )
-    ).toBe("test:accept");
+    ).toBe("test:accept:false");
+  });
+
+  it("supports using all request headers as vary inputs", () => {
+    const english = createResponseCacheKey(
+      {
+        method: "GET",
+        url: "/items",
+        headers: { "accept-language": "en", "x-version": "1" },
+      },
+      { namespace: "test", vary: "*" }
+    );
+    const chinese = createResponseCacheKey(
+      {
+        method: "GET",
+        url: "/items",
+        headers: { "accept-language": "zh", "x-version": "1" },
+      },
+      { namespace: "test", vary: "*" }
+    );
+
+    expect(english).not.toBe(chinese);
+    expect(
+      createResponseCacheKey(
+        { method: "GET", url: "/items", headers: { a: "1" } },
+        {
+          namespace: "test",
+          vary: "*",
+          keyBuilder: (_request, context) =>
+            `${context.vary.join(",")}:${context.varyAllHeaders}`,
+        }
+      )
+    ).toBe("a:true");
   });
 
   it("uses the default namespace and ignores missing vary headers", () => {
