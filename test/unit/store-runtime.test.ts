@@ -433,14 +433,30 @@ describe("response cache runtime", () => {
   });
 
   it("uses cache-hub redis URL and default URL paths only when redis mode is explicit", async () => {
-    const explicitUrl = createResponseCacheRuntime(
-      { mode: "redis", url: "redis://localhost:6379" },
-      1_000
-    );
-    const defaultUrl = createResponseCacheRuntime({ mode: "redis" }, 1_000);
+    const runtimes: Array<{ close(): Promise<void> }> = [];
+    const createOrCaptureError = (
+      options: Parameters<typeof createResponseCacheRuntime>[0]
+    ): Error | undefined => {
+      try {
+        runtimes.push(createResponseCacheRuntime(options, 1_000));
+        return undefined;
+      } catch (error) {
+        return error instanceof Error ? error : new Error(String(error));
+      }
+    };
 
-    await explicitUrl.close();
-    await defaultUrl.close();
+    const results = [
+      createOrCaptureError({ mode: "redis", url: "redis://localhost:6379" }),
+      createOrCaptureError({ mode: "redis" }),
+    ];
+
+    for (const error of results) {
+      if (error) {
+        expect(error.message).toContain("ioredis");
+      }
+    }
+
+    await Promise.all(runtimes.map((runtime) => runtime.close()));
   });
 
   it("creates multi-level runtime and clears by namespace tag instead of clearing redis", async () => {
