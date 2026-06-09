@@ -1,6 +1,6 @@
 {
   "name": "response-cache-kit",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Framework-agnostic response caching toolkit for Node.js services.",
   "type": "module",
   "main": "./dist/cjs/index.cjs",
@@ -58,13 +58,13 @@
     "access": "public"
   },
   "dependencies": {
-    "cache-hub": "^2.2.0"
+    "cache-hub": "2.2.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@vitest/coverage-v8": "^4.1.8",
-    "esbuild": "^0.28.0",
-    "typescript": "^5.4.0",
-    "vitest": "^4.1.8"
+    "@types/node": "20.19.41",
+    "@vitest/coverage-v8": "4.1.8",
+    "esbuild": "0.28.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.8"
   }
 }

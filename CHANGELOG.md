@@ -3,6 +3,7 @@
 ## 目录导航
 
 - [Unreleased](#unreleased)
+- [1.2.1 - 2026-06-09](#121---2026-06-09)
 - [1.2.0 - 2026-06-03](#120---2026-06-03)
 - [1.1.0 - 2026-06-03](#110---2026-06-03)
 - [1.0.1 - 2026-06-03](#101---2026-06-03)
@@ -11,6 +12,11 @@
 ## Unreleased
 
 - No unreleased changes.
+
+## 1.2.1 - 2026-06-09
+
+- Pin direct runtime and dev dependencies in `package.json` to exact versions already resolved by `package-lock.json`.
+- Keep the public API, exports, and Node.js baseline unchanged.
 
 ## 1.2.0 - 2026-06-03
 

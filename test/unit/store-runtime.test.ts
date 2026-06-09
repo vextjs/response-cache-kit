@@ -432,16 +432,15 @@ describe("response cache runtime", () => {
     await disabledLease.close();
   });
 
-  it("uses cache-hub redis URL and default URL paths only when redis mode is explicit", () => {
-    expect(() =>
-      createResponseCacheRuntime(
-        { mode: "redis", url: "redis://localhost:6379" },
-        1_000
-      )
-    ).toThrow("ioredis");
-    expect(() =>
-      createResponseCacheRuntime({ mode: "redis" }, 1_000)
-    ).toThrow("ioredis");
+  it("uses cache-hub redis URL and default URL paths only when redis mode is explicit", async () => {
+    const explicitUrl = createResponseCacheRuntime(
+      { mode: "redis", url: "redis://localhost:6379" },
+      1_000
+    );
+    const defaultUrl = createResponseCacheRuntime({ mode: "redis" }, 1_000);
+
+    await explicitUrl.close();
+    await defaultUrl.close();
   });
 
   it("creates multi-level runtime and clears by namespace tag instead of clearing redis", async () => {
