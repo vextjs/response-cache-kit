@@ -42,13 +42,13 @@
     "cache-hub",
     "vext"
   ],
-  "homepage": "https://github.com/vextjs/response-cache-kit#readme",
+  "homepage": "https://github.com/devcodex-labs/response-cache-kit#readme",
   "bugs": {
-    "url": "https://github.com/vextjs/response-cache-kit/issues"
+    "url": "https://github.com/devcodex-labs/response-cache-kit/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vextjs/response-cache-kit.git"
+    "url": "git+https://github.com/devcodex-labs/response-cache-kit.git"
   },
   "license": "Apache-2.0",
   "engines": {
